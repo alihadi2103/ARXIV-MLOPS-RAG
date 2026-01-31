@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/FastAPI-0.115+-green.svg" alt="FastAPI">
   <img src="https://img.shields.io/badge/OpenSearch-2.19-orange.svg" alt="OpenSearch">
   <img src="https://img.shields.io/badge/Docker-Compose-blue.svg" alt="Docker">
-  <img src="https://img.shields.io/badge/Status-Week%207%20Advanced%20Features-brightgreen.svg" alt="Status">
+ 
 </p>
 
 </br>
