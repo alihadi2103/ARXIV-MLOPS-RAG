@@ -1,0 +1,137 @@
+name: CI/CD Airflow-MLops
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_PREFIX: ${{ github.repository }}
+      K8S_NAMESPACE: ml-platform
+
+    steps:
+      # ---------------------------------------------------
+      # 1. Checkout source code
+      # ---------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # ---------------------------------------------------
+      # 2. Docker Buildx
+      # ---------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      # ---------------------------------------------------
+      # 3. Login to Docker Registry
+      # ---------------------------------------------------
+      - name: Docker Login
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # ---------------------------------------------------
+      # 4. Build & Push Airflow Base Image
+      # ---------------------------------------------------
+      - name: Build & Push Airflow Base
+        run: |
+          docker build -f docker/Dockerfile.airflow \
+            -t ${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-base:latest .
+          docker push ${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-base:latest
+
+      # ---------------------------------------------------
+      # 5. Build & Push Airflow Runtime Images
+      # ---------------------------------------------------
+      - name: Build & Push Airflow Images
+        run: |
+          for svc in scheduler worker webserver; do
+            docker build \
+              --build-arg BASE_IMAGE=${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-base:latest \
+              -f docker/Dockerfile.$svc \
+              -t ${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-$svc:latest .
+            docker push ${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-$svc:latest
+          done
+
+      # ---------------------------------------------------
+      # 6. Build & Push MLflow Image
+      # ---------------------------------------------------
+      - name: Build & Push MLflow
+        run: |
+          docker build -f docker/Dockerfile.mlflow \
+            -t ${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/mlflow-server:latest .
+          docker push ${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/mlflow-server:latest
+
+      # ---------------------------------------------------
+      # 7. ZenML Pipeline Health Check
+      # ---------------------------------------------------
+      - name: ZenML pipeline test
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/zenml:/zenml \
+            -e MLFLOW_TRACKING_URI=${{ secrets.MLFLOW_TRACKING_URI }} \
+            ${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-worker:latest \
+            zenml pipeline run training_pipeline --test
+
+      # ===================================================
+      # DEPLOYMENT (ONLY IF TEST PASSES)
+      # ===================================================
+
+      # ---------------------------------------------------
+      # 8. Configure AWS Credentials
+      # ---------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # ---------------------------------------------------
+      # 9. Install kubectl CLI (REQUIRED)
+      # ---------------------------------------------------
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: latest
+
+      # ---------------------------------------------------
+      # 10. Configure kubeconfig for EKS
+      # ---------------------------------------------------
+      - name: Configure kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region ${{ secrets.AWS_REGION }}
+
+      # ---------------------------------------------------
+      # 11. Ensure namespace exists
+      # ---------------------------------------------------
+      - name: Create namespace
+        run: |
+          kubectl create namespace $K8S_NAMESPACE || true
+
+      # ---------------------------------------------------
+      # 12. Replace image references (recursive)
+      # ---------------------------------------------------
+      - name: Update Kubernetes manifests
+        run: |
+          for file in $(find ./k8s -type f -name '*.yaml'); do
+            sed -i "s|airflow-scheduler:latest|${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-scheduler:latest|g" $file
+            sed -i "s|airflow-worker:latest|${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-worker:latest|g" $file
+            sed -i "s|airflow-webserver:latest|${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/airflow-webserver:latest|g" $file
+            sed -i "s|mlflow-server:latest|${{ secrets.DOCKER_REGISTRY }}/$IMAGE_PREFIX/mlflow-server:latest|g" $file
+          done
+
+      # ---------------------------------------------------
+      # 13. Deploy to EKS
+      # ---------------------------------------------------
+      - name: Deploy to Kubernetes
+        if: success()
+        run: |
+          kubectl apply -n $K8S_NAMESPACE -f ./k8s/

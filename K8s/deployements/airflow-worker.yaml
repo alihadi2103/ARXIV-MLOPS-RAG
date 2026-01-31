@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-worker
+  namespace: ml-platform
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: airflow-worker
+  template:
+    metadata:
+      labels:
+        app: airflow-worker
+    spec:
+      containers:
+        - name: worker
+          image: airflow-worker:latest
+          imagePullPolicy: IfNotPresent
+          command: ["airflow", "celery", "worker"]
+          
+          envFrom:
+              - configMapRef:
+                  name: airflow-config
+              - configMapRef:
+                  name: mlflow-config
+              - secretRef:
+                  name: airflow-db
+              - secretRef:
+                  name: aws-credentials 
+          
+          
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
